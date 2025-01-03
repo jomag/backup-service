@@ -3,6 +3,26 @@ from typing import List, Optional
 import subprocess
 import tomllib
 import os
+import argparse
+import sys
+
+from pydantic import BaseModel
+from colorama import Fore, Style
+
+def print_status(text):
+    print(f"{Fore.YELLOW}{text}{Style.RESET_ALL}")
+
+def print_success(text):
+    print(f"{Fore.GREEN}{text}{Style.RESET_ALL}")
+
+def print_error(text):
+    print(f"{Fore.RED}{text}{Style.RESET_ALL}")
+
+def fatal_error(message: str, help :str):
+    print_error(message)
+    print()
+    print(help)
+    sys.exit(1)
 
 class ResticError(Exception):
     def __init__(self, message, output, error, retval):
@@ -32,37 +52,32 @@ def restic(
     if identity_file:
         cmd.extend(["-o", f'sftp.args=-i {identity_file}'])
 
-    print("Running command: ", cmd)
-    res = subprocess.run(
-        cmd,
-        capture_output=False,
-        text=True,
-        env=env,
-    )
+    try:
+        res = subprocess.run(
+            cmd,
+            capture_output=False,
+            text=True,
+            env=env,
+        )
+        if res.returncode != 0:
+            raise ResticError(
+                f"Failed running restic command '{command}'",
+                res.stdout,
+                res.stderr,
+                res.returncode,
+            )
+    except FileNotFoundError:
+        fatal_error("Restic command not found", "Make sure restic is available")
 
-    if res.returncode != 0:
-        raise ResticError(f"Failed running restic command '{command}'", res.stdout, res.stderr, res.returncode)
-
-class Repository:
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        method: str = "local",
-        path: Optional[str] = None,
-        password: Optional[str] = None,
-        host: Optional[str] = None,
-        user: Optional[str] = None,
-        identity_file: Optional[str] = None
-    ):
-        self.name = name
-        self.description = description
-        self.method = method
-        self.path = path
-        self.password = password
-        self.host = host
-        self.user = user
-        self.identity_file = identity_file
+class Repository(BaseModel):
+    name: str
+    description: str
+    method: str = "local"
+    path: Optional[str] = None
+    password: Optional[str] = None
+    host: Optional[str] = None
+    user: Optional[str] = None
+    identity_file: Optional[str] = None
 
     def get_password(self):
         return self.password or "123"
@@ -85,7 +100,7 @@ class Repository:
             raise RepositoryError(f"Unsupported repository access method: '{self.method}'")
 
     def _restic(self, cmd: str, args: Optional[List[str]] = None):
-        restic(self.get_url(), self.get_password(), cmd, identity_file=self.identity_file)
+        restic(self.get_url(), self.get_password(), cmd, args, identity_file=self.identity_file)
 
     def initialize(self):
         """Initialize repo if not already initialized"""
@@ -94,62 +109,90 @@ class Repository:
     def check(self):
         """Run health-check on repository"""
         self._restic("check")
+
+    def backup(self, paths: List[str]):
+        self._restic("backup", paths)
          
-class Operation:
-    def __init__(
-        self,
-        directory: str,
-        description: str,
-        repos: List[str]
-    ):
-        self.directory = directory
-        self.description = description
-        self.repos = repos
+class Operation(BaseModel):
+    directory: str
+    description: str
+    repos: List[str]
 
 def read_config(path: str):
     with open(path, "rb") as f:
         data = tomllib.load(f)
 
+    repos: List[Repository] = []
+    backups: List[Operation] = []
+
     if "repo" in data:
-        for name, repo in data["repo"].items():
-            print(name, repo)
+        for name, cfg in data["repo"].items():
+            repos.append(Repository(name=name, **cfg))
 
     if "backup" in data:
-        for name, backup in data["backup"].items():
-            print(name, backup)
+        for name, cfg in data["backup"].items():
+            backups.append(Operation(**cfg))
 
-    print(data) 
+    return repos, backups 
     
 
-def cmd_backup(ops: List[Operation], repos: List[Repository]):
-    for repo in repos:
-        try:
-            repo.check()
-        except ResticError:
-            print("Health check of repo failed. Try initializing.")
-            repo.initialize()
-            repo.check()
+def cmd_backup(args):
+    repos, backups = read_config(args.config)
 
-def cmd_initialize(repos: List[Repository]):
+    for repo in repos:
+        repo_backups = [b for b in backups if repo.name in b.repos]
+        paths = [b.directory for b in repo_backups]
+        print_status(f"Backup to {repo.name}:")
+        for p in paths:
+            print_status(f" - {p}")
+        repo.backup(paths)
+
+def cmd_init(args):
+    repos, _ = read_config(args.config)
+
     success = []
     fails = []
     for repo in repos:
+        print_status(f"Initializing {repo.method} repository '{repo.name}'")
         try:
             repo.initialize()
             success.append(repo.name)
         except ResticError:
             fails.append(repo.name)
-    print(f"Successfully initialized {len(success)} repositories:", ", ".join(success))
-    print(f"Failed to initialize {len(fails)} repositories:", ", ".join(fails))
             
-            
+    if len(success) > 0:
+        print_success(f"Successfully initialized {len(success)} repositories:")
+        for r in success:
+            print(f" - {r}")
+        print()
 
-def cmd_health_check(repos: List[Repository]):
-    pass
+    if len(fails) > 0:
+        print_error(f"Failed to initialize {len(fails)} repositories:")
+        for r in fails:
+            print(f" - {r}")
+        print()
 
-read_config("backup.toml")
+def cmd_check(repos: List[Repository]):
+    repos, _ = read_config(args.config)
 
+    for repo in repos:
+        print_status(f"Run health check for {repo.method} repository '{repo.name}'")
+        repo.check()
 
-#cmd_initialize(repositories)
-# cmd_backup(operations, repositories)
+parser = argparse.ArgumentParser(prog="Backup Service")
+subparsers = parser.add_subparsers(help="command")
 
+parser_init = subparsers.add_parser("init", help="Initialize repositories")
+parser_init.add_argument("-c", "--config", help="Config file", required=True)
+parser_init.set_defaults(func=cmd_init)
+
+parser_check = subparsers.add_parser("check", help="Run health checks on repositories")
+parser_check.add_argument("-c", "--config", help="Config file", required=True)
+parser_check.set_defaults(func=cmd_check)
+
+parser_backup = subparsers.add_parser("backup", help="Perform backup")
+parser_backup.add_argument("-c", "--config", help="Config file", required=True)
+parser_backup.set_defaults(func=cmd_backup)
+
+args = parser.parse_args()
+args.func(args)
