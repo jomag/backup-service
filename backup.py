@@ -49,11 +49,11 @@ class Repository:
         name: str,
         description: str,
         method: str = "local",
-        path: str = None,
-        password: str = None,
-        host: str = None,
-        user: str = None,
-        identity_file: str = None
+        path: Optional[str] = None,
+        password: Optional[str] = None,
+        host: Optional[str] = None,
+        user: Optional[str] = None,
+        identity_file: Optional[str] = None
     ):
         self.name = name
         self.description = description
@@ -84,7 +84,7 @@ class Repository:
         else:
             raise RepositoryError(f"Unsupported repository access method: '{self.method}'")
 
-    def _restic(self, cmd: str, args: List[str] = None):
+    def _restic(self, cmd: str, args: Optional[List[str]] = None):
         restic(self.get_url(), self.get_password(), cmd, identity_file=self.identity_file)
 
     def initialize(self):
@@ -113,6 +113,10 @@ def read_config(path: str):
     if "repo" in data:
         for name, repo in data["repo"].items():
             print(name, repo)
+
+    if "backup" in data:
+        for name, backup in data["backup"].items():
+            print(name, backup)
 
     print(data) 
     
