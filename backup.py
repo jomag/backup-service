@@ -6,8 +6,9 @@ import os
 import argparse
 import sys
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from colorama import Fore, Style
+from dotenv import load_dotenv
 
 def print_status(text):
     print(f"{Fore.YELLOW}{text}{Style.RESET_ALL}")
@@ -18,10 +19,11 @@ def print_success(text):
 def print_error(text):
     print(f"{Fore.RED}{text}{Style.RESET_ALL}")
 
-def fatal_error(message: str, help :str):
+def fatal_error(message: str, help: Optional[str] = None):
     print_error(message)
     print()
-    print(help)
+    if help:
+        print(help)
     sys.exit(1)
 
 class ResticError(Exception):
@@ -75,11 +77,22 @@ class Repository(BaseModel):
     method: str = "local"
     path: Optional[str] = None
     password: Optional[str] = None
+    password_env: Optional[str] = None
     host: Optional[str] = None
     user: Optional[str] = None
     identity_file: Optional[str] = None
 
+    class Config:
+        extra = 'forbid'
+
     def get_password(self):
+        if self.password is not None:
+            return self.password
+        if self.password_env is not None:
+            try:
+                return os.environ[self.password_env]
+            except KeyError:
+                fatal_error(f"Failed to find password env variable with name {self.password_env}")
         return self.password or "123"
 
     def get_url(self):
@@ -110,13 +123,21 @@ class Repository(BaseModel):
         """Run health-check on repository"""
         self._restic("check")
 
-    def backup(self, paths: List[str]):
-        self._restic("backup", paths)
+    def backup(self, paths: List[str], host: Optional[str]=None):
+        args = [*paths]
+        if host:
+            args.extend(["--host", host])
+        self._restic("backup", args)
          
 class Operation(BaseModel):
-    directory: str
+    host: Optional[str] = None
+    path: str
     description: str
     repos: List[str]
+    
+    class Config:
+        extra = 'forbid'
+
 
 def read_config(path: str):
     with open(path, "rb") as f:
@@ -141,7 +162,7 @@ def cmd_backup(args):
 
     for repo in repos:
         repo_backups = [b for b in backups if repo.name in b.repos]
-        paths = [b.directory for b in repo_backups]
+        paths = [b.path for b in repo_backups]
         print_status(f"Backup to {repo.name}:")
         for p in paths:
             print_status(f" - {p}")
@@ -179,8 +200,10 @@ def cmd_check(repos: List[Repository]):
         print_status(f"Run health check for {repo.method} repository '{repo.name}'")
         repo.check()
 
+load_dotenv()
+
 parser = argparse.ArgumentParser(prog="Backup Service")
-subparsers = parser.add_subparsers(help="command")
+subparsers = parser.add_subparsers(help="command", required=True)
 
 parser_init = subparsers.add_parser("init", help="Initialize repositories")
 parser_init.add_argument("-c", "--config", help="Config file", required=True)
