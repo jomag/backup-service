@@ -160,13 +160,22 @@ def read_config(path: str):
 def cmd_backup(args):
     repos, backups = read_config(args.config)
 
+    backups_by_host = {}
+
+    for b in backups:
+        if b.host in backups_by_host:
+            backups_by_host[b.host].append(b)
+        else:
+            backups_by_host[b.host] = [b]
+
     for repo in repos:
-        repo_backups = [b for b in backups if repo.name in b.repos]
-        paths = [b.path for b in repo_backups]
-        print_status(f"Backup to {repo.name}:")
-        for p in paths:
-            print_status(f" - {p}")
-        repo.backup(paths)
+        for host in backups_by_host:
+            repo_backups = [b for b in backups_by_host[host] if repo.name in b.repos]
+            paths = [b.path for b in repo_backups]
+            print_status(f"Backup as host '{host}' to {repo.name}:")
+            for p in paths:
+                print_status(f" - {p}")
+            repo.backup(paths, host=host)
 
 def cmd_init(args):
     repos, _ = read_config(args.config)
